@@ -13,8 +13,12 @@ if errorlevel 1 exit /b 1
 ".build-venv\Scripts\python.exe" -m PyInstaller --clean --noconfirm Fallout4VoiceRandomizer.spec
 if errorlevel 1 exit /b 1
 
+copy /Y "README_USER.md" "dist\Fallout4VoiceRandomizer\README.md" >nul
+if errorlevel 1 exit /b 1
+
 echo.
 echo Build complete: dist\Fallout4VoiceRandomizer\Fallout4VoiceRandomizer.exe
+echo User guide: dist\Fallout4VoiceRandomizer\README.md
 echo Copy or run the entire Fallout4VoiceRandomizer folder.
 
 pause

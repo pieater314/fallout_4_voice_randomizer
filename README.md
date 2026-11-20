@@ -80,7 +80,9 @@ cross-build Windows apps.
 The build script creates an isolated `.build-venv`, installs the pinned build
 tool from `requirements-build.txt`, and creates a one-folder app. The folder
 contains the app, WMAEncodeRS, and its license. Keep and copy the full
-`dist\Fallout4VoiceRandomizer` folder; do not copy only the `.exe`.
+`dist\Fallout4VoiceRandomizer` folder; do not copy only the `.exe`. The build
+also copies `README_USER.md` to the app folder as `README.md`. This shorter
+guide is for users of the packaged app.
 The executable's Windows file properties show the application version under
 **Details**. This version comes from `voice_randomizer/__init__.py`.
 
