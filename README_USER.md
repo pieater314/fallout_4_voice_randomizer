@@ -33,10 +33,13 @@ The application currently creates loose files and/or a ZIP file. BA2 output is n
    application. Select a folder outside the game installation. Do not select
    the game folder or one of its parent folders.
 4. Select a randomization mode.
-5. Keep **Loose files** selected. BA2 output is not available.
-6. Keep **Create mod ZIP** selected to create a ZIP for your mod manager.
-   Clear it if you do not want a ZIP (recommended).
-7. Keep the generated seed or enter your own seed.
+5. Under **Mod output**, keep **Loose files** selected. BA2 archive files are
+   not available.
+6. **Create ZIP for mod manager (recommended)** is selected by default. Keep
+   it selected to create `Fallout4VoiceRandomizer.zip` in the output folder.
+   Clear it to leave the files in the `mod` folder for manual packaging.
+7. Keep the generated seed, select **New seed** to create another, or enter
+   your own. Use the same seed, game files, and app version to repeat a shuffle.
 8. Select **Create mod** and wait for the run to finish.
 
 To stop a run, select **Cancel** and wait for the application to stop. If the
