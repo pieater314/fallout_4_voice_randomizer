@@ -9,6 +9,10 @@ The application supports the following modes:
 - **Within each character/NPC** shuffles voice lines within each character or
   NPC.
 - **Main character voices** shuffles the main character voice lines.
+- **Sounds only** shuffles WAV and XWM effects under `sound/fx`. It converts
+  audio to the destination format when needed. It excludes voice files and
+  paths marked as music or jingles. This name-based filter cannot identify all
+  music. Some effects can contain speech or music.
 
 The application currently creates loose files and/or a ZIP file. BA2 output is not available.
 
@@ -18,9 +22,10 @@ The application currently creates loose files and/or a ZIP file. BA2 output is n
 - Keep all files in the `Fallout4VoiceRandomizer` folder together.
 - The game folder must contain `Fallout4.exe` and a `Data` folder. 
   The default game files location is the default Steam install location.
-- The application needs a Fallout 4 installation with its base game voice
-  archive. It also uses recognized official DLC when its plugin and voice
-  archive are present.
+- Voice modes need the base game voice archive. Sounds-only mode needs the
+  base game sound archive. 
+- The app uses recognized official DLC when
+  its plugin and matching archive are present.
 - The bundled audio converter needs the Windows Media runtime. Windows N/KN
   editions may need the Media Feature Pack.
 
@@ -57,7 +62,7 @@ It contains:
 - `mod` - the generated mod files.
 - `Fallout4VoiceRandomizer.zip` - present when ZIP creation is selected.
 - `manifest.json` - the seed and input archive details.
-- `randomization_log.txt` - a list of the voice file changes.
+- `randomization_log.txt` - a list of the file changes and any sound exclusions.
 
 Move or rename an existing `Fallout4VoiceRandomizer` output folder before you
 create another mod in the same working folder.
@@ -81,4 +86,4 @@ sResourceDataDirsFinal=
 ```
 
 To remove the mod, disable or remove it with your mod manager. Do not replace
-or edit the original game voice archives.
+or edit the original game archives.

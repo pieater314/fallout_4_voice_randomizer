@@ -119,7 +119,7 @@ class ModeSelectionTests(unittest.TestCase):
         self.assertEqual(str(separator["background"]), "System3dLight")
         self.assertEqual(int(separator.grid_info()["row"]), 3)
 
-    def test_only_main_character_mode_can_be_selected(self):
+    def test_available_modes_can_be_selected(self):
         def widgets(parent):
             for child in parent.winfo_children():
                 yield child
@@ -136,9 +136,8 @@ class ModeSelectionTests(unittest.TestCase):
         self.assertEqual(self.app.mode.get(), "player")
         self.assertFalse(buttons["player"].instate(["disabled"]))
         self.assertFalse(buttons["character"].instate(["disabled"]))
-        for name in ("sounds", "chaos"):
-            with self.subTest(mode=name):
-                self.assertTrue(buttons[name].instate(["disabled"]))
+        self.assertFalse(buttons["sounds"].instate(["disabled"]))
+        self.assertTrue(buttons["chaos"].instate(["disabled"]))
 
     def test_ba2_output_is_unavailable(self):
         def widgets(parent):
@@ -301,6 +300,90 @@ class ModeSelectionTests(unittest.TestCase):
         self.assertEqual(str(self.app.cancel["state"]), "normal")
         self.assertEqual(str(self.app.start["state"]), "disabled")
 
+    def test_activity_moves_below_progress_bar_and_stops_on_completion(self):
+        self.set_valid_folders()
+        self.root.deiconify()
+        bar = self.app.bar
+        indicator = self.app.activity_indicator
+        creation = bar.master
+        for size in ("760x680", "1000x1000"):
+            with self.subTest(size=size):
+                self.root.geometry(size)
+                self.root.update()
+                self.assertGreaterEqual(
+                    indicator.winfo_rooty(), bar.winfo_rooty() + bar.winfo_height()
+                )
+                self.assertEqual(
+                    indicator.winfo_rootx() + indicator.winfo_width(),
+                    bar.winfo_rootx() + bar.winfo_width(),
+                )
+                self.assertLessEqual(
+                    indicator.winfo_rooty() + indicator.winfo_height(),
+                    creation.winfo_rooty() + creation.winfo_height(),
+                )
+        self.assertEqual(self.app.activity_symbol.get(), "")
+
+        with patch("voice_randomizer.__main__.threading.Thread"):
+            self.app.start.invoke()
+        initial = self.app.activity_symbol.get()
+        self.assertTrue(initial)
+        self.app.poll()
+        self.assertNotEqual(self.app.activity_symbol.get(), initial)
+
+        self.app.events.put(("done", r"C:\test\output", "loose", False))
+        self.app.poll()
+        self.assertEqual(self.app.activity_symbol.get(), "")
+        self.app.poll()
+        self.assertEqual(self.app.activity_symbol.get(), "")
+
+    def test_activity_advances_during_scheduled_polling(self):
+        self.set_valid_folders()
+        scheduled = []
+
+        def schedule(*args):
+            callback_id = tk.Misc.after(self.root, *args)
+            scheduled.append(callback_id)
+            return callback_id
+
+        self.root.after.side_effect = schedule
+        with patch("voice_randomizer.__main__.threading.Thread"):
+            self.app.start_run()
+        initial = self.app.activity_symbol.get()
+        observed = []
+        self.root.after(100, self.app.poll)
+        self.root.after(150, lambda: observed.append(self.app.activity_symbol.get()))
+        self.root.after(200, lambda: self.app.events.put(("cancelled",)))
+        self.root.after(350, self.root.quit)
+        self.root.mainloop()
+        for callback_id in scheduled:
+            self.root.after_cancel(callback_id)
+        self.assertTrue(observed)
+        self.assertNotEqual(observed[0], initial)
+        self.assertEqual(self.app.activity_symbol.get(), "")
+
+    def test_activity_stops_on_cancellation_and_failure(self):
+        self.set_valid_folders()
+        for event in (("cancelled",), ("error", "test failure")):
+            with self.subTest(event=event[0]):
+                with patch("voice_randomizer.__main__.threading.Thread"):
+                    self.app.start_run()
+                self.assertTrue(self.app.activity_symbol.get())
+                if event[0] == "cancelled":
+                    self.app.cancel_run()
+                    self.assertTrue(self.app.activity_symbol.get())
+                self.app.events.put(event)
+                with patch("voice_randomizer.__main__.messagebox.showerror"):
+                    self.app.poll()
+                self.assertEqual(self.app.activity_symbol.get(), "")
+
+    def test_invalid_settings_do_not_start_activity(self):
+        self.set_valid_folders()
+        self.app.seed.set("")
+        with patch("voice_randomizer.__main__.threading.Thread") as thread:
+            self.app.start_run()
+        thread.assert_not_called()
+        self.assertEqual(self.app.activity_symbol.get(), "")
+
     def test_zip_selection_is_passed_to_build(self):
         self.set_valid_folders()
         self.assertTrue(self.app.create_zip.get())
@@ -329,6 +412,16 @@ class ModeSelectionTests(unittest.TestCase):
         self.app.events.put(("progress", "Processing voices", 25, 100))
         self.app.poll()
         self.assertEqual(str(self.app.bar["mode"]), "determinate")
+
+    def test_sound_mode_progress_and_exclusion_summary(self):
+        self.app.mode.set("sounds")
+        self.app.events.put(("progress", "Reading archives", 0, 1))
+        self.app.poll()
+        self.assertEqual(self.app.status.get(), "Reading game sound archives...")
+        self.app.events.put(("done", r"C:\test\output", "loose", False,
+                             "Excluded 3 sound paths. See the manifest and log for details."))
+        self.app.poll()
+        self.assertIn("Excluded 3 sound paths", self.app.status.get())
 
     def test_cancel_request_and_cancelled_result_have_clear_states(self):
         self.set_valid_folders()

@@ -1,4 +1,5 @@
 from pathlib import Path
+from importlib.metadata import distribution
 import sys
 
 
@@ -14,6 +15,7 @@ from PyInstaller.utils.win32.versioninfo import (
     VarFileInfo,
     VarStruct,
 )
+from PyInstaller.utils.hooks import collect_data_files
 
 from voice_randomizer import __version__
 
@@ -48,6 +50,14 @@ datas = [
     (str(VENDOR / "WMAEncodeRS.exe"), "vendor/WMAEncodeRS"),
     (str(VENDOR / "LICENSE"), "vendor/WMAEncodeRS"),
     (str(VENDOR / "README.md"), "vendor/WMAEncodeRS"),
+]
+datas += collect_data_files("imageio_ffmpeg", includes=["binaries/*"])
+datas += [
+    (str(ROOT / "vendor" / "FFmpeg" / "README.txt"), "vendor/FFmpeg"),
+    (str(ROOT / "vendor" / "FFmpeg" / "COPYING.GPLv3"), "vendor/FFmpeg"),
+    (str(distribution("imageio-ffmpeg").locate_file(
+        "imageio_ffmpeg-0.6.0.dist-info/LICENSE"
+    )), "vendor/FFmpeg"),
 ]
 
 a = Analysis(

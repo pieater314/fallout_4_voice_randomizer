@@ -1,5 +1,7 @@
 import json
 import tempfile
+import threading
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -10,7 +12,7 @@ from test_fuz import riff
 from voice_randomizer import __version__
 from voice_randomizer.audio import AudioConversionError
 from voice_randomizer.ba2 import VoiceArchive
-from voice_randomizer.fuz import Fuz
+from voice_randomizer.fuz import Fuz, replace_audio
 from voice_randomizer.pipeline import Cancelled, build
 
 
@@ -66,6 +68,111 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(archive.entries), 4)
         self.assertEqual((mod / "VoiceRandomizer1.esl").read_bytes()[:4], b"TES4")
         self.assertFalse((out / "files").exists())
+
+    def test_voice_workers_preserve_mapping_and_output(self):
+        for mode in ("player", "character"):
+            for output_type in ("loose", "ba2"):
+                with self.subTest(mode=mode, output=output_type):
+                    root = self.root / f"{mode}-{output_type}"
+                    with patch("voice_randomizer.pipeline._VOICE_WORKERS", 1):
+                        single = build(self.game, root / "single", output_type, "seed",
+                                       lambda *_: None, lambda: False, mode=mode)
+                    barrier = threading.Barrier(4, timeout=5)
+                    lock = threading.Lock()
+                    active = 0
+                    peak = 0
+
+                    def replace(destination, source, *, check_cancel):
+                        nonlocal active, peak
+                        with lock:
+                            active += 1
+                            peak = max(peak, active)
+                        try:
+                            barrier.wait()
+                            check_cancel()
+                            return replace_audio(destination, source)
+                        finally:
+                            with lock:
+                                active -= 1
+
+                    with patch("voice_randomizer.pipeline.replace_audio", side_effect=replace):
+                        parallel = build(self.game, root / "parallel", output_type, "seed",
+                                         lambda *_: None, lambda: False, mode=mode)
+                    self.assertEqual(peak, 4)
+                    reports = [
+                        json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+                        for output in (single, parallel)
+                    ]
+                    self.assertEqual(reports[0]["mapping"], reports[1]["mapping"])
+                    outputs = [
+                        {path.relative_to(output / "mod").as_posix(): path.read_bytes()
+                         for path in (output / "mod").rglob("*") if path.is_file()}
+                        for output in (single, parallel)
+                    ]
+                    self.assertEqual(outputs[0], outputs[1])
+
+    def test_voice_worker_failure_stops_other_workers(self):
+        for mode in ("player", "character"):
+            with self.subTest(mode=mode):
+                barrier = threading.Barrier(4, timeout=5)
+                lock = threading.Lock()
+                started = 0
+                stopped = []
+
+                def replace(destination, source, *, check_cancel):
+                    nonlocal started
+                    with lock:
+                        started += 1
+                        number = started
+                    barrier.wait()
+                    if number == 1:
+                        raise ValueError("voice conversion failed")
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        try:
+                            check_cancel()
+                        except Cancelled:
+                            with lock:
+                                stopped.append(number)
+                            raise
+                        time.sleep(0.01)
+                    self.fail("Worker did not receive cancellation.")
+
+                work = self.root / f"failure-{mode}"
+                with patch("voice_randomizer.pipeline.replace_audio", side_effect=replace):
+                    with self.assertRaisesRegex(ValueError, "voice conversion failed"):
+                        build(self.game, work, "loose", "seed", lambda *_: None,
+                              lambda: False, mode=mode)
+                self.assertEqual(len(stopped), 3)
+                self.assertFalse((work / "Fallout4VoiceRandomizer").exists())
+                self.assertEqual(list(work.iterdir()), [])
+
+    def test_user_cancellation_stops_active_voice_workers(self):
+        for mode in ("player", "character"):
+            with self.subTest(mode=mode):
+                barrier = threading.Barrier(4, timeout=5)
+                cancelled = threading.Event()
+                lock = threading.Lock()
+                stopped = []
+
+                def replace(destination, source, *, check_cancel):
+                    barrier.wait()
+                    cancelled.set()
+                    try:
+                        check_cancel()
+                    except Cancelled:
+                        with lock:
+                            stopped.append(True)
+                        raise
+                    self.fail("Worker did not receive cancellation.")
+
+                work = self.root / f"cancel-{mode}"
+                with patch("voice_randomizer.pipeline.replace_audio", side_effect=replace):
+                    with self.assertRaises(Cancelled):
+                        build(self.game, work, "loose", "seed", lambda *_: None,
+                              cancelled.is_set, mode=mode)
+                self.assertEqual(len(stopped), 4)
+                self.assertEqual(list(work.iterdir()), [])
 
     def test_failure_and_cancellation_do_not_publish(self):
         with self.assertRaises(Cancelled):

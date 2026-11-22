@@ -27,7 +27,8 @@ class VoiceEntry:
 
 
 class VoiceArchive:
-    def __init__(self, path: Path, voice_filter: set[bytes] | None = None):
+    def __init__(self, path: Path, voice_filter: set[bytes] | None = None,
+                 *, sound_effects: bool = False):
         """Read voice entries from a BA2 archive.
         
         Args:
@@ -64,25 +65,20 @@ class VoiceArchive:
                 if len(name) != length:
                     raise ValueError(f"{path}: incomplete BA2 name")
                 parts = name.lower().replace(b"\\", b"/").split(b"/")
-                if (
-                    len(parts) < 5
-                    or parts[:2] != [b"sound", b"voice"]
-                    or not parts[-1].endswith(b".fuz")
-                ):
-                    continue
-                
-                # Support both path structures:
-                # 1. Real Fallout 4: sound/voice/game.esm/playervoicemale01/line.fuz (5 parts)
-                # 2. Test format: sound/voice/fallout4.esm/voice/filename.fuz (5 parts, but voice is in filename)
-                # For filtering, extract from directory name (parts[3])
-                if len(parts) == 5:
-                    voice_type = parts[3]
+                if sound_effects:
+                    if len(parts) < 3 or parts[:2] != [b"sound", b"fx"]:
+                        continue
+                    voice_type = b""
                 else:
-                    # For longer paths, use the last path component before filename
-                    voice_type = parts[-2]
-                
-                if voice_filter and voice_type not in voice_filter:
-                    continue
+                    if (
+                        len(parts) < 5
+                        or parts[:2] != [b"sound", b"voice"]
+                        or not parts[-1].endswith(b".fuz")
+                    ):
+                        continue
+                    voice_type = parts[3] if len(parts) == 5 else parts[-2]
+                    if voice_filter and voice_type not in voice_filter:
+                        continue
                 if any(
                     part in (b"", b".", b"..")
                     or part.endswith((b".", b" "))
@@ -94,14 +90,15 @@ class VoiceArchive:
                     )
                     for part in parts
                 ):
-                    raise ValueError(f"{path}: unsafe voice path")
+                    raise ValueError(f"{path}: unsafe {'sound' if sound_effects else 'voice'} path")
                 try:
                     decoded = name.decode("utf-8").replace("\\", "/")
                 except UnicodeDecodeError:
-                    # Skip entries with invalid encoding
+                    if sound_effects:
+                        raise ValueError(f"{path}: invalid sound path encoding")
                     continue
                 key = decoded.casefold()
-                if key in seen:
+                if key in seen and not sound_effects:
                     raise ValueError(f"{path}: duplicate voice path: {decoded}")
                 seen.add(key)
                 selected.append((index, decoded, voice_type.decode("ascii")))

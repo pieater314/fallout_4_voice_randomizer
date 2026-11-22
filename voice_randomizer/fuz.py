@@ -2,7 +2,7 @@
 
 import struct
 from dataclasses import dataclass
-from typing import Literal
+from typing import Callable, Literal
 
 
 AudioFormat = Literal["xwm", "wav"]
@@ -45,7 +45,8 @@ class Fuz:
         return _HEADER.pack(b"FUZE", 1, len(self.lip)) + self.lip + self.audio
 
 
-def replace_audio(destination: Fuz, source: Fuz, converter=None) -> Fuz:
+def replace_audio(destination: Fuz, source: Fuz, converter=None, *,
+                  check_cancel: Callable[[], None] | None = None) -> Fuz:
     destination_format = audio_format(destination.audio)
     source_format = audio_format(source.audio)
     if destination_format == source_format:
@@ -53,6 +54,7 @@ def replace_audio(destination: Fuz, source: Fuz, converter=None) -> Fuz:
     from .audio import convert_audio
 
     converted = convert_audio(
-        source.audio, source_format, destination_format, converter
+        source.audio, source_format, destination_format, converter,
+        check_cancel=check_cancel,
     )
     return Fuz(destination.lip, converted)
