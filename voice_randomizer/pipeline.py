@@ -7,17 +7,22 @@ import shutil
 import struct
 import tempfile
 import zipfile
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event
 from typing import Callable
 
 from .ba2 import VoiceArchive, VoiceEntry, _HEADER, _RECORD
 from .fuz import Fuz, replace_audio
 from .randomization import shuffle_pool
+from .sounds import SoundFormat, UnsupportedSound, convert_sound, discover_sounds, sound_format
 from . import __version__
 
 _OFFICIAL = ("fallout4", "dlcrobot", "dlccoast", "dlcnukaworld", "dlcworkshop01",
              "dlcworkshop02", "dlcworkshop03")
+_SOUND_WORKERS = 4
+_VOICE_WORKERS = 4
 Progress = Callable[[str, int, int], None]
 
 
@@ -209,6 +214,104 @@ def _write_zip(mod: Path, target: Path, progress: Progress,
     progress("Verifying ZIP", total, total)
 
 
+def _write_entries(mapping: dict[str, str], by_path: dict[str, Input],
+                   formats: dict[str, SoundFormat], stage: Path, files: Path,
+                   work: Path, progress: Progress, cancelled: Callable[[], bool],
+                   *, sounds: bool) -> tuple[list[dict[str, str]],
+                                             dict[Path, list[tuple[VoiceEntry, Path]]]]:
+    stop = Event()
+    tasks = iter(enumerate(mapping.items()))
+    pending: dict[Future[bytes], tuple[int, str, str, Input, Input]] = {}
+    manifest: dict[int, dict[str, str]] = {}
+    written: dict[int, tuple[Path, VoiceEntry, Path]] = {}
+    total = len(mapping)
+    completed = 0
+    workers = _SOUND_WORKERS if sounds else _VOICE_WORKERS
+
+    def check_cancel() -> None:
+        if stop.is_set() or cancelled():
+            raise Cancelled()
+
+    def convert(destination: str, source: str, dst: Input, src: Input) -> bytes:
+        check_cancel()
+        try:
+            if sounds:
+                data = src.archive.read(src.entry)
+                check_cancel()
+                result = convert_sound(
+                    data, formats[source.casefold()], formats[destination.casefold()],
+                    stage, check_cancel,
+                )
+            else:
+                dst_fuz = Fuz.parse(dst.archive.read(dst.entry))
+                check_cancel()
+                src_fuz = Fuz.parse(src.archive.read(src.entry))
+                check_cancel()
+                result = replace_audio(dst_fuz, src_fuz, check_cancel=check_cancel).to_bytes()
+            check_cancel()
+            return result
+        except ValueError as error:
+            raise ValueError(
+                f"Cannot replace {dst.archive.path.name}!{destination} with "
+                f"{src.archive.path.name}!{source}: {error}"
+            ) from error
+
+    executor = ThreadPoolExecutor(max_workers=workers)
+    try:
+        def submit_tasks() -> None:
+            while len(pending) < workers:
+                check_cancel()
+                try:
+                    index, (destination, source) = next(tasks)
+                except StopIteration:
+                    break
+                dst = by_path[destination.casefold()]
+                src = by_path[source.casefold()]
+                future = executor.submit(convert, destination, source, dst, src)
+                pending[future] = (index, destination, source, dst, src)
+
+        submit_tasks()
+        while pending:
+            check_cancel()
+            done, _ = wait(pending, timeout=0.2, return_when=FIRST_COMPLETED)
+            for future in done:
+                index, destination, source, dst, src = pending.pop(future)
+                result = future.result()
+                check_cancel()
+                if sounds and shutil.disk_usage(work).free < 2 * len(result):
+                    raise OSError("Not enough free space to stage and publish the sound output.")
+                target = files.joinpath(*destination.split("/"))
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(result)
+                if sounds and hashlib.sha256(target.read_bytes()).digest() != hashlib.sha256(result).digest():
+                    raise ValueError(f"Sound output verification failed: {destination}")
+                manifest[index] = {
+                    "destination": destination, "source": source,
+                    "destination_archive": dst.archive.path.name,
+                    "source_archive": src.archive.path.name,
+                }
+                if sounds:
+                    manifest[index]["source_format"] = formats[source.casefold()].kind
+                    manifest[index]["destination_format"] = formats[destination.casefold()].kind
+                else:
+                    written[index] = (dst.archive.path, dst.entry, target)
+                completed += 1
+                if completed % 100 == 0 or completed == total:
+                    progress("Processing sounds" if sounds else "Processing voices",
+                             completed, total)
+            submit_tasks()
+    finally:
+        stop.set()
+        for future in pending:
+            future.cancel()
+        executor.shutdown(wait=True, cancel_futures=True)
+    records: dict[Path, list[tuple[VoiceEntry, Path]]] = {}
+    for index in sorted(written):
+        archive, entry, target = written[index]
+        records.setdefault(archive, []).append((entry, target))
+    return [manifest[index] for index in sorted(manifest)], records
+
+
 def build(game: Path, work: Path, output_type: str, seed: str,
           progress: Progress, cancelled: Callable[[], bool],
           create_zip: bool = False, mode: str = "player") -> Path:
@@ -216,10 +319,12 @@ def build(game: Path, work: Path, output_type: str, seed: str,
     work = work.resolve()
     if game == work or game in work.parents or work in game.parents:
         raise ValueError("Select a working folder outside the game installation.")
-    if mode not in ("player", "character"):
-        raise ValueError("Select 'player' or 'character' randomization mode.")
+    if mode not in ("player", "character", "sounds"):
+        raise ValueError("Select 'player', 'character', or 'sounds' randomization mode.")
     if output_type not in ("loose", "ba2"):
         raise ValueError("Select loose files or BA2 output.")
+    if mode == "sounds" and output_type != "loose":
+        raise ValueError("Sounds-only mode supports loose files only.")
     if not seed:
         raise ValueError("Enter a random seed.")
     work.mkdir(parents=True, exist_ok=True)
@@ -227,26 +332,72 @@ def build(game: Path, work: Path, output_type: str, seed: str,
     if final.exists():
         raise FileExistsError(f"Output already exists: {final}. Move or rename it before running.")
     progress("Reading archives", 0, 1)
-    archives = discover(game, mode=mode)
+    archives = discover_sounds(game) if mode == "sounds" else discover(game, mode=mode)
     identities = {}
     for archive in archives:
         stat = archive.path.stat()
         identities[archive.path] = (stat.st_size, stat.st_mtime_ns)
     by_path: dict[str, Input] = {}
     pools: dict[str, list[str]] = {}
-    for archive in archives:
-        for entry in archive.entries:
-            key = entry.path.casefold()
-            if key in by_path:
-                raise ValueError(f"Duplicate voice path across archives: {entry.path}")
-            by_path[key] = Input(archive, entry)
-            if mode == "character":
-                pool_key = entry.path.rsplit("/", 1)[0].casefold()
+    formats: dict[str, SoundFormat] = {}
+    exclusions = []
+    if mode == "sounds":
+        candidates: dict[str, list[Input]] = {}
+        for archive in archives:
+            for entry in archive.entries:
+                candidates.setdefault(entry.path.casefold(), []).append(Input(archive, entry))
+        total_candidates = len(candidates)
+        for index, (key, items) in enumerate(sorted(candidates.items()), 1):
+            if cancelled():
+                raise Cancelled()
+            item = items[0]
+            reason = None
+            if len(items) > 1:
+                reason = "Duplicate path"
+            elif item.archive.path.name.casefold() == "fallout4 - startup.ba2":
+                reason = "Startup loose-file override is not verified"
+            elif ("music" in key or "jingle" in key
+                  or "mus" in re.split(r"[/_.-]+", key)):
+                reason = "Music-related path"
+            elif Path(item.entry.path).suffix.casefold() not in (".wav", ".xwm"):
+                reason = "Unsupported file extension"
             else:
-                pool_key = entry.voice
-            pools.setdefault(pool_key, []).append(entry.path)
+                try:
+                    fmt = sound_format(item.archive.read(item.entry))
+                    if fmt.kind != Path(item.entry.path).suffix[1:].casefold():
+                        raise ValueError("Audio format does not match the file extension.")
+                except UnsupportedSound as error:
+                    reason = str(error)
+                except ValueError as error:
+                    raise ValueError(
+                        f"Invalid sound {item.archive.path.name}!{item.entry.path}: {error}"
+                    ) from error
+                else:
+                    by_path[key] = item
+                    formats[key] = fmt
+                    pools.setdefault("sound-effects", []).append(item.entry.path)
+            if reason:
+                exclusions.append({"path": item.entry.path,
+                                   "archives": [i.archive.path.name for i in items],
+                                   "reason": reason})
+            if index % 100 == 0 or index == total_candidates:
+                progress("Inspecting sounds", index, total_candidates)
+    else:
+        for archive in archives:
+            for entry in archive.entries:
+                key = entry.path.casefold()
+                if key in by_path:
+                    raise ValueError(f"Duplicate voice path across archives: {entry.path}")
+                by_path[key] = Input(archive, entry)
+                if mode == "character":
+                    pool_key = entry.path.rsplit("/", 1)[0].casefold()
+                else:
+                    pool_key = entry.voice
+                pools.setdefault(pool_key, []).append(entry.path)
     if not by_path:
-        if mode == "character":
+        if mode == "sounds":
+            raise ValueError("No supported sound effects were found.")
+        elif mode == "character":
             raise ValueError("No voice lines were found.")
         else:
             raise ValueError("No player voice lines were found.")
@@ -254,7 +405,9 @@ def build(game: Path, work: Path, output_type: str, seed: str,
     for pool_key, paths in sorted(pools.items()):
         voice_seed = seed + ":" + pool_key
         mapping.update(shuffle_pool(paths, voice_seed))
-    required = sum(item.entry.size for item in by_path.values()) * (2 if output_type == "ba2" else 1)
+    required = sum(item.entry.size for item in by_path.values()) * (
+        2 if output_type == "ba2" or mode == "sounds" else 1
+    )
     if shutil.disk_usage(work).free < required:
         raise OSError("Not enough free space in the working folder.")
     if cancelled():
@@ -265,26 +418,8 @@ def build(game: Path, work: Path, output_type: str, seed: str,
         mod = stage / "mod"
         mod.mkdir()
         files = stage / "files" if output_type == "ba2" else mod
-        records: dict[Path, list[tuple[VoiceEntry, Path]]] = {}
-        manifest = []
-        total = len(mapping)
-        for index, (destination, source) in enumerate(mapping.items(), 1):
-            if cancelled():
-                raise Cancelled()
-            dst = by_path[destination.casefold()]
-            src = by_path[source.casefold()]
-            dst_fuz = Fuz.parse(dst.archive.read(dst.entry))
-            src_fuz = Fuz.parse(src.archive.read(src.entry))
-            result = replace_audio(dst_fuz, src_fuz).to_bytes()
-            target = files.joinpath(*destination.split("/"))
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(result)
-            records.setdefault(dst.archive.path, []).append((dst.entry, target))
-            manifest.append({"destination": destination, "source": source,
-                             "destination_archive": dst.archive.path.name,
-                             "source_archive": src.archive.path.name})
-            if index % 100 == 0 or index == total:
-                progress("Processing voices", index, total)
+        manifest, records = _write_entries(mapping, by_path, formats, stage, files, work,
+                                           progress, cancelled, sounds=mode == "sounds")
         if output_type == "ba2":
             for index, archive in enumerate(archives, 1):
                 if cancelled():
@@ -317,6 +452,10 @@ def build(game: Path, work: Path, output_type: str, seed: str,
                                 "size": identities[a.path][0],
                                 "mtime_ns": identities[a.path][1]} for a in archives],
                   "mapping": manifest}
+        if mode == "sounds":
+            report.update({"mode": mode, "pool_rules": "Supported WAV and XWM sound effects",
+                           "exclusions": exclusions,
+                           "unchanged_pools": sum(len(paths) == 1 for paths in pools.values())})
         (stage / "manifest.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
         log_lines = [
             f"Fallout 4 Voice Randomizer {__version__} mapping",
@@ -328,6 +467,12 @@ def build(game: Path, work: Path, output_type: str, seed: str,
             f"{item['destination_archive']}!{item['destination']}"
             for item in manifest
         )
+        if mode == "sounds":
+            log_lines.extend(["", f"Excluded sound paths: {len(exclusions)}"])
+            log_lines.extend(
+                f"Excluded {item['path']} ({', '.join(item['archives'])}): {item['reason']}"
+                for item in exclusions
+            )
         (stage / "randomization_log.txt").write_text(
             "\n".join(log_lines) + "\n", encoding="utf-8"
         )

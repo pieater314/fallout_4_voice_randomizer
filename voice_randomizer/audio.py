@@ -6,7 +6,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 from .fuz import AudioFormat, audio_format
 
@@ -16,6 +16,31 @@ class AudioConversionError(ValueError):
 
 
 ConverterCommand = str | os.PathLike[str] | Sequence[str]
+
+
+def _run(command: list[str], check_cancel: Callable[[], None]) -> None:
+    try:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as error:
+        raise AudioConversionError(f"Could not start audio converter: {error}") from error
+    try:
+        while True:
+            check_cancel()
+            try:
+                stdout, stderr = process.communicate(timeout=0.2)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    except BaseException:
+        process.terminate()
+        process.communicate()
+        raise
+    if process.returncode:
+        detail = (stderr or stdout).decode(errors="replace").strip()
+        message = f"Audio conversion failed with exit code {process.returncode}."
+        if detail:
+            message += f" {detail}"
+        raise AudioConversionError(message)
 
 
 def _converter_command(converter: ConverterCommand | None) -> list[str]:
@@ -45,6 +70,8 @@ def convert_audio(
     source_format: AudioFormat,
     target_format: AudioFormat,
     converter: ConverterCommand | None = None,
+    *,
+    check_cancel: Callable[[], None] | None = None,
 ) -> bytes:
     """Convert a validated XWMA or WAV payload to the target format."""
     if source_format == target_format:
@@ -57,23 +84,7 @@ def convert_audio(
         source_path = folder / f"source{source_suffix}"
         target_path = folder / f"converted{target_suffix}"
         source_path.write_bytes(audio)
-        try:
-            result = subprocess.run(
-                [*command, str(source_path), str(target_path)],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        except OSError as error:
-            raise AudioConversionError(
-                f"Could not run WMAEncodeRS: {error}"
-            ) from error
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout).strip()
-            message = f"Audio conversion failed with exit code {result.returncode}."
-            if detail:
-                message += f" {detail}"
-            raise AudioConversionError(message)
+        _run([*command, str(source_path), str(target_path)], check_cancel or (lambda: None))
         if not target_path.is_file():
             raise AudioConversionError(
                 "WMAEncodeRS completed without creating the converted audio file."

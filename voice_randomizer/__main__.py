@@ -1,6 +1,7 @@
 """Windows desktop interface for the voice randomizer."""
 
 import os
+import json
 import queue
 import secrets
 import sys
@@ -36,6 +37,8 @@ class Application:
         self.mode = tk.StringVar(value="player")
         self.seed = tk.StringVar(value=secrets.token_hex(8))
         self.status = tk.StringVar(value="Choose folders and settings to create a mod.")
+        self.activity_symbol = tk.StringVar(value="")
+        self._activity_step = 0
         self.game_feedback = tk.StringVar()
         self.work_feedback = tk.StringVar()
         self.output_path_preview = tk.StringVar()
@@ -80,7 +83,7 @@ class Application:
         for label, value, state in (
             ("Within each character/NPC", "character", "normal"),
             ("Main character voices", "player", "normal"),
-            ("Sounds only", "sounds", "disabled"),
+            ("Sounds only", "sounds", "normal"),
             ("Chaos mode: sounds and voices", "chaos", "disabled"),
         ):
             button = ttk.Radiobutton(
@@ -141,8 +144,9 @@ class Application:
         )
         ttk.Label(
             settings,
-            text="The app leaves your game files unchanged. "
-            "Shuffled voices will not match lip movements or subtitles.",
+            text="The app leaves your game files unchanged. Shuffled voices will not "
+            "match lip movements or subtitles. Sounds only excludes voice files and "
+            "music-related paths, but some effects can contain speech or music.",
             wraplength=700,
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
@@ -173,8 +177,15 @@ class Application:
         ).pack(side="left")
         self.bar = ttk.Progressbar(creation, maximum=100)
         self.bar.grid(row=1, column=0, sticky="ew", pady=4)
-        ttk.Label(creation, textvariable=self.status, wraplength=700).grid(
-            row=2, column=0, sticky="w", pady=(0, 6)
+        status_row = ttk.Frame(creation)
+        status_row.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        status_row.columnconfigure(0, weight=1)
+        self.activity_indicator = ttk.Label(
+            status_row, textvariable=self.activity_symbol, width=2, anchor="e"
+        )
+        self.activity_indicator.grid(row=0, column=1, sticky="e")
+        ttk.Label(status_row, textvariable=self.status, wraplength=680).grid(
+            row=0, column=0, sticky="w"
         )
         ttk.Label(creation, text="Installation instructions").grid(
             row=3, column=0, sticky="w"
@@ -201,6 +212,8 @@ class Application:
         self.seed.trace_add("write", self._update_create_state)
         self._refresh_path_guidance()
         self._update_create_state()
+        root.update_idletasks()
+        root.minsize(760, max(680, root.winfo_reqheight()))
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.after(100, self.poll)
 
@@ -355,6 +368,7 @@ class Application:
         self.open_output.configure(state="disabled")
         self.cancel_event.clear()
         self.running = True
+        self._advance_activity()
         for widget in self.input_widgets:
             widget.configure(state="disabled")
         self.start.configure(state="disabled")
@@ -372,7 +386,17 @@ class Application:
                     ),
                     self.cancel_event.is_set, create_zip=create_zip, mode=mode
                 )
-                self.events.put(("done", str(result), output, create_zip))
+                summary = ""
+                if mode == "sounds":
+                    report = json.loads((result / "manifest.json").read_text(encoding="utf-8"))
+                    summary = (
+                        f"Excluded {len(report['exclusions'])} sound paths. "
+                        "See the manifest and log for details."
+                    )
+                if mode == "sounds":
+                    self.events.put(("done", str(result), output, create_zip, summary))
+                else:
+                    self.events.put(("done", str(result), output, create_zip))
             except Cancelled:
                 self.events.put(("cancelled",))
             except Exception as error:
@@ -407,9 +431,18 @@ class Application:
             self.bar.configure(mode="determinate")
             self._progress_indeterminate = False
 
+    def _advance_activity(self) -> None:
+        if self.running:
+            frames = ("|", "/", "-", "\\")
+            self.activity_symbol.set(frames[self._activity_step])
+            self._activity_step = (self._activity_step + 1) % len(frames)
+
     def _update_progress(self, stage: str, current: int, total: int) -> None:
         if stage == "Reading archives":
-            self.status.set("Reading game voice archives...")
+            self.status.set(
+                "Reading game sound archives..." if self.mode.get() == "sounds"
+                else "Reading game voice archives..."
+            )
             if not self._progress_indeterminate:
                 self.bar.configure(mode="indeterminate")
                 self.bar.start(12)
@@ -435,12 +468,14 @@ class Application:
                     self._update_progress(event[1], event[2], event[3])
                 else:
                     self.running = False
+                    self.activity_symbol.set("")
                     self._stop_indeterminate_progress()
                     for widget in self.input_widgets:
                         widget.configure(state="normal")
                     self.cancel.configure(state="disabled")
                     if event[0] == "done":
-                        self.status.set("Mod created.")
+                        summary = event[4] if len(event) > 4 else ""
+                        self.status.set(f"Mod created. {summary}".strip())
                         self.bar["value"] = 100
                         self.last_output_path = Path(event[1])
                         self.open_output.configure(state="normal")
@@ -483,6 +518,7 @@ class Application:
                     self._refresh_path_guidance()
         except queue.Empty:
             pass
+        self._advance_activity()
         self.root.after(100, self.poll)
 
 

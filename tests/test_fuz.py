@@ -1,4 +1,5 @@
 import struct
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -7,6 +8,7 @@ from unittest.mock import patch
 
 from voice_randomizer import audio
 from voice_randomizer.fuz import Fuz, audio_format, replace_audio
+from voice_randomizer.pipeline import Cancelled
 
 
 def riff(kind: bytes, payload: bytes = b"") -> bytes:
@@ -66,6 +68,29 @@ class FuzTests(unittest.TestCase):
         for data in invalid:
             with self.subTest(data=data), self.assertRaises(ValueError):
                 Fuz.parse(data)
+
+    def test_cancel_stops_voice_converter(self):
+        processes = []
+        popen = subprocess.Popen
+
+        def start(*args, **kwargs):
+            process = popen(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        def cancel():
+            raise Cancelled()
+
+        with patch("voice_randomizer.audio.subprocess.Popen", side_effect=start):
+            with self.assertRaises(Cancelled):
+                replace_audio(
+                    Fuz(b"destination", riff(b"WAVE")),
+                    Fuz(b"source", riff(b"XWMA")),
+                    [sys.executable, "-c", "import time; time.sleep(20)"],
+                    check_cancel=cancel,
+                )
+        self.assertEqual(len(processes), 1)
+        self.assertIsNotNone(processes[0].poll())
 
 
 if __name__ == "__main__":

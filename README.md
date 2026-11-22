@@ -5,22 +5,28 @@
 
 ## Summary
 
-A Windows-only utility that shuffles Fallout 4 player and NPC voice lines into
-experimental mod files, with optional ZIP output and a manifest.
+A Windows-only utility that shuffles Fallout 4 voice lines or sound effects
+into experimental mod files, with optional ZIP output and a manifest.
 
 ## Current limitations
 
-- Sounds-only, chaos, and Austin. modes are not available.
+- Chaos mode is not available.
 - BA2 output is experimental and disabled in the interface.
 - Other Fallout games are not supported.
-- Loose-file and BA2 output have not been verified in game. BA2 plugin loading
-  and archive precedence have not been verified for every setup.
-- Real audio conversion through the app and WAV playback in Fallout 4 remain
+- Playback of generated WAV files and loop markers in Fallout 4 remains
   unverified.
+- Sounds-only output excludes startup-only effects, duplicate paths, audio
+  cues, unsupported audio, Creation Club, and third-party mods. It excludes
+  paths containing `music` or `jingle`, and paths with a `mus` name component.
+  This name-based filter cannot identify all music. Some effects can contain
+  speech or music.
+- For supported WAV loops, the app scales the destination loop markers to fit
+  the replacement audio. Loop playback in Fallout 4 has not been verified.
 
 The app stops if it finds duplicate selected voice paths or multiple voice
-archives for the same base game or DLC. It includes recognized official DLC
-only when both the matching `.esm` and voice archive are present.
+archives for the same base game or DLC. Voice modes include recognized
+official DLC only when both the matching `.esm` and voice archive are present.
+Sounds-only mode reports an incomplete DLC plugin and main archive pair.
 
 ## Run from source
 
@@ -31,15 +37,13 @@ only when both the matching `.esm` and voice archive are present.
    python -m venv .venv
    ```
 
-3. Start the application:
+3. Install the audio decoder and start the application:
 
    ```powershell
+   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
    .\.venv\Scripts\python.exe -m voice_randomizer
    ```
 
-The application has no third-party Python runtime dependencies. Use a separate
-virtual environment on each operating system. Virtual environments are not
-portable between Windows and Linux.
 
 ### Audio conversion
 
@@ -55,14 +59,24 @@ $env:WMAENCODERS_PATH = "C:\Tools\WMAEncodeRS.exe"
 
 WMAEncodeRS supports XWMA to WAV decoding and WAV to XWMA encoding. The
 application validates the output container before it uses the converted audio.
-This check does not prove that the audio will play in the game. Real conversion
-through this app and WAV playback in Fallout 4 remain unverified. Same-format
-replacements do not need conversion. The executable requires
+This check does not prove that the audio will play in the game. WAV and loop
+playback in Fallout 4 remain unverified. Same-format replacements do not need
+conversion. The executable requires
 64-bit Windows 10 or 11 and the Windows Media runtime. Windows N/KN editions
 may need the Media Feature Pack. Its license and release details are in
 [`vendor/WMAEncodeRS/`](vendor/WMAEncodeRS/README.md). Conversion can use
 temporary files in the system temporary folder as well as space in the working
 folder.
+
+All modes process up to four files at once. This can increase CPU, memory, and
+temporary disk use.
+
+Sounds-only mode uses FFmpeg from `imageio-ffmpeg` to decode and resample
+audio. It uses WMAEncodeRS to encode XWM. Conversion can require substantial
+temporary space and time. The Windows FFmpeg binary is GPL-3.0-or-later; its
+license and source references are in
+[`vendor/FFmpeg/`](vendor/FFmpeg/README.txt). Before distributing a build,
+verify all FFmpeg and linked-library source and license requirements.
 
 ## Build a Windows test app
 
@@ -108,7 +122,8 @@ runtime and access to a Fallout 4 installation to create a mod.
    the generated voice data; BA2 output also stages loose files. Allow extra
    space for conversion and filesystem overhead. ZIP output requires additional
    space for both the ZIP and its staged copy.
-3. Select **Main character voices** or **Within each character/NPC**.
+3. Select **Main character voices**, **Within each character/NPC**, or
+   **Sounds only**.
 4. `Loose files` is selected; BA2 output is currently unavailable in the UI.
 5. Leave **Create mod ZIP** selected to generate an installable ZIP alongside
    the mod folder, or clear it to skip ZIP creation.
@@ -125,6 +140,9 @@ existing output folder first. The `mod` folder contains the generated files;
 times, and mapping. `randomization_log.txt` provides a readable
 source-archive/source-path to destination-archive/destination-path list. If
 selected, `Fallout4VoiceRandomizer.zip` contains only the generated mod files.
+For sounds-only mode, the manifest and log also list excluded paths and their
+reasons. The output preserves each destination format; the app converts
+between WAV and XWM when needed.
 The ZIP stores files without compression. Keep generated files, ZIPs, and
 manifests local: they can contain game data and must not be distributed with
 the application.
@@ -149,7 +167,7 @@ enable the ZIP in the mod manager.
   ```
 - For BA2 output, install the generated `.ba2` files and `.esl` plugins. BA2
   output is experimental and has not been verified in game.
-- Other mods that replace the same voice files can conflict. The active
+- Other mods that replace the same voice or sound files can conflict. The active
   replacement depends on the game's and mod manager's load order.
 - To remove the result, disable or remove the generated mod from the mod
   manager. Do not replace the original voice archives.
