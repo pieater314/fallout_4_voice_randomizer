@@ -311,9 +311,10 @@ class Application:
     def _update_create_state(self, *_: str) -> None:
         if not hasattr(self, "start"):
             return
+        seed = self.seed.get().strip()
         self.seed_feedback.set(
-            "Enter a seed to continue."
-            if not self.seed.get().strip()
+            "Enter a seed to continue." if not seed
+            else "A random seed will be used for this run." if seed == "Austin."
             else "Use the same seed, game files, and app version to repeat a shuffle."
         )
         can_start = not self.running and not self.path_error and bool(self.seed.get().strip())

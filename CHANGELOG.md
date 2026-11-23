@@ -4,6 +4,9 @@ Notable changes to each application release are listed here.
 
 ## [Unreleased]
 
+## [0.1.5] - 20261122 - Beta release
+- added easteregg
+
 ## [0.1.4] - 20261122 - Beta release
 - implemented chaos mode
 
