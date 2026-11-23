@@ -241,6 +241,9 @@ class ModeSelectionTests(unittest.TestCase):
         self.app.seed.set("  ")
         self.assertIn("Enter a seed", self.app.seed_feedback.get())
         self.assertEqual(str(self.app.start["state"]), "disabled")
+        self.app.seed.set("Austin.")
+        self.assertIn("random seed", self.app.seed_feedback.get())
+        self.assertEqual(str(self.app.start["state"]), "normal")
 
     def test_completion_instructions_appear_in_main_window_for_built_output_type(self):
         self.set_valid_folders()

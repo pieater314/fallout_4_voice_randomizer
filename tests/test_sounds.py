@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from test_ba2 import archive_bytes
 from voice_randomizer.audio import AudioConversionError
+from voice_randomizer.ba2 import VoiceArchive
 from voice_randomizer.fuz import Fuz
 from voice_randomizer.pipeline import Cancelled, build
 from voice_randomizer.sounds import SoundFormat, UnsupportedSound, convert_sound, sound_format
@@ -566,6 +567,140 @@ class ChaosModeTests(unittest.TestCase):
                 build(self.game, self.work, "loose", "seed", progress,
                       lambda: False, mode="chaos")
         self.assertFalse((self.work / "Fallout4VoiceRandomizer").exists())
+
+
+class AustinModeTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.game = self.root / "game"
+        self.data = self.game / "Data"
+        self.data.mkdir(parents=True)
+        (self.game / "Fallout4.exe").touch()
+        self.austin = "Sound/Voice/Fallout4.esm/PlayerVoiceMale01/00190636_1.fuz"
+        self.voices = {
+            self.austin: Fuz(b"austin-lip", audio("wav", b"AA")),
+        }
+        for index in range(19):
+            voice = "PlayerVoiceMale01" if index < 9 else "NPC"
+            name = f"Sound/Voice/Fallout4.esm/{voice}/{index}.fuz"
+            self.voices[name] = Fuz(f"lip-{index}".encode(), audio("wav", bytes([index, 0])))
+        self.sounds = {
+            f"sound/fx/{index}.wav": audio("wav", bytes([index, 1]))
+            for index in range(20)
+        }
+        self.write_voices()
+        (self.data / "Fallout4 - Sounds.ba2").write_bytes(archive_bytes(
+            1, [(name.encode(), content, False) for name, content in self.sounds.items()]
+        ))
+
+    def write_voices(self):
+        (self.data / "Fallout4 - Voices.ba2").write_bytes(archive_bytes(
+            1, [(name.encode(), fuz.to_bytes(), False) for name, fuz in self.voices.items()]
+        ))
+
+    def test_selected_share_and_audio_for_each_mode_and_output(self):
+        for mode, output_type in (
+            ("player", "loose"), ("player", "ba2"),
+            ("character", "loose"), ("character", "ba2"),
+            ("sounds", "loose"), ("chaos", "loose"),
+        ):
+            with self.subTest(mode=mode, output=output_type):
+                with patch("voice_randomizer.pipeline.secrets.token_hex", return_value="random-seed"):
+                    out = build(self.game, self.root / f"{mode}-{output_type}", output_type,
+                                "Austin.", lambda *_: None, lambda: False, mode=mode)
+                report = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+                self.assertEqual(report["seed"], "random-seed")
+                self.assertTrue(report["austin_mode"])
+                mapping = report["mapping"]
+                expected_total = {"player": 10, "character": 20, "sounds": 20, "chaos": 40}[mode]
+                self.assertEqual(len(mapping), expected_total)
+                chosen = [item for item in mapping if item["source"] == self.austin]
+                self.assertEqual(len(chosen), (expected_total * 35 + 50) // 100)
+                if output_type == "ba2":
+                    archive = VoiceArchive(out / "mod" / "VoiceRandomizer1 - Main.ba2")
+                    results = {entry.path: archive.read(entry) for entry in archive.entries}
+                else:
+                    results = {item["destination"]: (out / "mod" / item["destination"]).read_bytes()
+                               for item in mapping}
+                for item in mapping:
+                    destination = item["destination"]
+                    result = results[destination]
+                    if destination in self.voices:
+                        fuz = Fuz.parse(result)
+                        self.assertEqual(fuz.lip, self.voices[destination].lip)
+                        result = fuz.audio
+                    if item["source"] == self.austin:
+                        self.assertEqual(result, self.voices[self.austin].audio)
+                    else:
+                        self.assertNotEqual(result, self.voices[self.austin].audio)
+
+    def test_missing_source_fails_without_publishing(self):
+        del self.voices[self.austin]
+        self.write_voices()
+        for mode in ("player", "character", "sounds", "chaos"):
+            with self.subTest(mode=mode):
+                work = self.root / mode
+                with self.assertRaisesRegex(ValueError, "Required voice line not found"):
+                    build(self.game, work, "loose", "Austin.", lambda *_: None,
+                          lambda: False, mode=mode)
+                self.assertFalse((work / "Fallout4VoiceRandomizer").exists())
+
+    def test_xwm_source_is_converted_for_sound_and_voice_destinations(self):
+        self.voices[self.austin] = Fuz(b"austin-lip", audio("xwm", b"AA"))
+        self.write_voices()
+
+        def fake_run(command, check_cancel):
+            check_cancel()
+            encoder = "--silent" in command
+            source = Path(command[1] if encoder else command[command.index("-i") + 1])
+            target = Path(command[2] if encoder else command[-1])
+            content = source.read_bytes()
+            data_pos = content.index(b"data")
+            size = struct.unpack_from("<I", content, data_pos + 4)[0]
+            payload = content[data_pos + 8:data_pos + 8 + size]
+            target.write_bytes(audio("xwm" if encoder else "wav", payload))
+
+        for mode in ("sounds", "chaos"):
+            with self.subTest(mode=mode):
+                with patch("voice_randomizer.pipeline.secrets.token_hex", return_value="random-seed"), \
+                     patch("voice_randomizer.sounds._run", side_effect=fake_run):
+                    out = build(self.game, self.root / mode, "loose", "Austin.",
+                                lambda *_: None, lambda: False, mode=mode)
+                report = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+                selected = [item for item in report["mapping"] if item["source"] == self.austin]
+                self.assertTrue(selected)
+                for item in selected:
+                    destination = item["destination"]
+                    result = (out / "mod" / destination).read_bytes()
+                    if destination in self.voices:
+                        result = Fuz.parse(result).audio
+                    self.assertEqual(sound_format(result).kind, item["destination_format"])
+                    self.assertIn(b"AA", result)
+
+    def test_changed_source_archive_does_not_publish_in_sounds_mode(self):
+        archive = self.data / "Fallout4 - Voices.ba2"
+
+        def progress(stage, current, total):
+            if stage == "Processing sounds" and current == total:
+                with archive.open("ab") as stream:
+                    stream.write(b"changed")
+
+        work = self.root / "changed"
+        with self.assertRaisesRegex(ValueError, "Input archive changed"):
+            build(self.game, work, "loose", "Austin.", progress, lambda: False,
+                  mode="sounds")
+        self.assertFalse((work / "Fallout4VoiceRandomizer").exists())
+
+    def test_trigger_is_case_sensitive(self):
+        del self.voices[self.austin]
+        self.write_voices()
+        out = build(self.game, self.root / "normal", "loose", "austin.",
+                    lambda *_: None, lambda: False, mode="player")
+        report = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["seed"], "austin.")
+        self.assertNotIn("austin_mode", report)
 
 
 if __name__ == "__main__":

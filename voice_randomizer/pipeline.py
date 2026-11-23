@@ -2,7 +2,9 @@
 
 import hashlib
 import json
+import random
 import re
+import secrets
 import shutil
 import struct
 import tempfile
@@ -23,6 +25,7 @@ _OFFICIAL = ("fallout4", "dlcrobot", "dlccoast", "dlcnukaworld", "dlcworkshop01"
              "dlcworkshop02", "dlcworkshop03")
 _SOUND_WORKERS = 4
 _VOICE_WORKERS = 4
+_AUSTIN_PATH = "sound/voice/fallout4.esm/playervoicemale01/00190636_1.fuz"
 Progress = Callable[[str, int, int], None]
 
 
@@ -254,6 +257,8 @@ def _write_entries(mapping: dict[str, str], by_path: dict[str, Input],
             elif mode == "sounds":
                 data = src.archive.read(src.entry)
                 check_cancel()
+                if not src.sound:
+                    data = Fuz.parse(data).audio
                 result = convert_sound(
                     data, formats[source.casefold()], formats[destination.casefold()],
                     stage, check_cancel,
@@ -350,12 +355,18 @@ def build(game: Path, work: Path, output_type: str, seed: str,
         raise ValueError(f"{'Sounds-only' if mode == 'sounds' else 'Chaos'} mode supports loose files only.")
     if not seed:
         raise ValueError("Enter a random seed.")
+    austin_mode = seed == "Austin."
+    if austin_mode:
+        seed = secrets.token_hex(8)
     work.mkdir(parents=True, exist_ok=True)
     final = work / "Fallout4VoiceRandomizer"
     if final.exists():
         raise FileExistsError(f"Output already exists: {final}. Move or rename it before running.")
     progress("Reading archives", 0, 1)
-    voice_archives = discover(game, mode="character" if mode == "chaos" else mode) if mode != "sounds" else []
+    voice_archives = (
+        discover(game, mode="character" if mode == "chaos" else mode)
+        if mode != "sounds" or austin_mode else []
+    )
     sound_archives = discover_sounds(game) if mode in ("sounds", "chaos") else []
     archives = voice_archives + sound_archives
     identities = {}
@@ -452,10 +463,42 @@ def build(game: Path, work: Path, output_type: str, seed: str,
             raise ValueError("No voice lines were found.")
         else:
             raise ValueError("No player voice lines were found.")
+    austin = None
+    if austin_mode:
+        base_archive = next(
+            archive for archive in voice_archives
+            if archive.path.name.casefold().startswith("fallout4 - voices")
+        )
+        austin_entry = next(
+            (entry for entry in base_archive.entries if entry.path.casefold() == _AUSTIN_PATH),
+            None,
+        )
+        if austin_entry is None:
+            raise ValueError(f"Required voice line not found in {base_archive.path.name}: {_AUSTIN_PATH}")
+        austin = Input(base_archive, austin_entry)
+        by_path[_AUSTIN_PATH] = austin
+        if mode in ("sounds", "chaos"):
+            try:
+                formats[_AUSTIN_PATH] = sound_format(Fuz.parse(base_archive.read(austin_entry)).audio)
+            except ValueError as error:
+                raise ValueError(f"Invalid voice {base_archive.path.name}!{austin_entry.path}: {error}") from error
     mapping = {}
     for pool_key, paths in sorted(pools.items()):
         voice_seed = seed + ":" + pool_key
-        mapping.update(shuffle_pool(paths, voice_seed))
+        pool_mapping = shuffle_pool(paths, voice_seed)
+        if austin_mode:
+            for destination, source in pool_mapping.items():
+                if source.casefold() == _AUSTIN_PATH and len(paths) > 1:
+                    alternatives = [path for path in paths if path.casefold() != _AUSTIN_PATH]
+                    pool_mapping[destination] = next(
+                        (path for path in alternatives if path != destination), alternatives[0]
+                    )
+        mapping.update(pool_mapping)
+    if austin is not None:
+        count = (len(mapping) * 35 + 50) // 100
+        destinations = sorted(mapping, key=str.casefold)
+        for destination in random.Random(seed + ":austin").sample(destinations, count):
+            mapping[destination] = austin.entry.path
     required = sum(item.entry.size for item in by_path.values()) * (
         2 if output_type == "ba2" or mode in ("sounds", "chaos") else 1
     )
@@ -503,6 +546,8 @@ def build(game: Path, work: Path, output_type: str, seed: str,
                                 "size": identities[a.path][0],
                                 "mtime_ns": identities[a.path][1]} for a in archives],
                   "mapping": manifest}
+        if austin_mode:
+            report["austin_mode"] = True
         if mode in ("sounds", "chaos"):
             report.update({"mode": mode, "pool_rules": (
                                "Supported voice audio and WAV and XWM sound effects"
