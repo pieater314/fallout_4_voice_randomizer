@@ -43,6 +43,7 @@ class PipelineTests(unittest.TestCase):
         log = (out / "randomization_log.txt").read_text(encoding="utf-8")
         self.assertIn(f"Fallout 4 Voice Randomizer {__version__} mapping", log)
         self.assertIn("Seed: seed", log)
+        self.assertEqual((out / "mod" / "_seed").read_text(encoding="utf-8"), "seed")
         for item in report["mapping"]:
             self.assertIn(
                 f"{item['source_archive']}!{item['source']} -> "
@@ -246,6 +247,7 @@ class PipelineTests(unittest.TestCase):
                 self.assertTrue((out / "manifest.json").is_file())
                 self.assertTrue((out / "randomization_log.txt").is_file())
                 with zipfile.ZipFile(out / "Fallout4VoiceRandomizer.zip") as archive:
+                    self.assertEqual(archive.read("_seed").decode("utf-8"), "seed")
                     self.assertEqual(set(archive.namelist()), set(files))
                     for name, content in files.items():
                         self.assertEqual(archive.read(name), content)

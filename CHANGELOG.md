@@ -2,7 +2,10 @@
 
 Notable changes to each application release are listed here.
 
-## [Unreleased]
+## [1.0.0] - 20261122
+- initial release
+
+--- 
 
 ## [0.1.5] - 20261122 - Beta release
 - added easteregg
@@ -21,4 +24,4 @@ Notable changes to each application release are listed here.
 - added README for excecutable builds
 
 ## [0.1.0] - 20261119 - Beta release
-- Initial beta release
+- initial beta release
