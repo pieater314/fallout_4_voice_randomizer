@@ -13,8 +13,14 @@ The application supports the following modes:
   audio to the destination format when needed. It excludes voice files and
   paths marked as music or jingles. This name-based filter cannot identify all
   music. Some effects can contain speech or music.
+- **Chaos mode** shuffles supported voices and sound effects together, including
+  voices from different characters. A voice can replace an effect, and an
+  effect can replace a voice. Each source is used once. Cross-type replacements
+  are possible but not guaranteed for every seed. The mode uses the sounds-only
+  exclusions and reports unsupported voice audio. Cross-type playback in the
+  game has not been verified.
 
-The application currently creates loose files and/or a ZIP file. BA2 output is not available.
+The application creates loose files or a ZIP file. BA2 output is not available.
 
 ## Before you start
 
@@ -23,11 +29,13 @@ The application currently creates loose files and/or a ZIP file. BA2 output is n
 - The game folder must contain `Fallout4.exe` and a `Data` folder. 
   The default game files location is the default Steam install location.
 - Voice modes need the base game voice archive. Sounds-only mode needs the
-  base game sound archive. 
+  base game sound archive. Chaos mode needs both archives.
 - The app uses recognized official DLC when
   its plugin and matching archive are present.
 - The bundled audio converter needs the Windows Media runtime. Windows N/KN
   editions may need the Media Feature Pack.
+- Sounds-only and chaos modes can require substantial temporary space and time
+  for audio conversion. Their output can conflict with other sound mods.
 
 ## Create a mod for use in Vortex, Mod Oraganizer 2, or other modding tools
 
@@ -42,7 +50,8 @@ The application currently creates loose files and/or a ZIP file. BA2 output is n
    not available.
 6. **Create ZIP for mod manager (recommended)** is selected by default. Keep
    it selected to create `Fallout4VoiceRandomizer.zip` in the output folder.
-   Clear it to leave the files in the `mod` folder for manual packaging.
+   The app does not save a separate `mod` folder. Clear this option to save
+   the files in the `mod` folder for manual packaging.
 7. Keep the generated seed, select **New seed** to create another, or enter
    your own. Use the same seed, game files, and app version to repeat a shuffle.
 8. Select **Create mod** and wait for the run to finish.
@@ -59,7 +68,7 @@ The application creates this folder:
 
 It contains:
 
-- `mod` - the generated mod files.
+- `mod` - the generated mod files, present only when ZIP creation is not selected.
 - `Fallout4VoiceRandomizer.zip` - present when ZIP creation is selected.
 - `manifest.json` - the seed and input archive details.
 - `randomization_log.txt` - a list of the file changes and any sound exclusions.

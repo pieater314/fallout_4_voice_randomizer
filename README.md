@@ -10,7 +10,6 @@ into experimental mod files, with optional ZIP output and a manifest.
 
 ## Current limitations
 
-- Chaos mode is not available.
 - BA2 output is experimental and disabled in the interface.
 - Other Fallout games are not supported.
 - Playback of generated WAV files and loop markers in Fallout 4 remains
@@ -22,6 +21,8 @@ into experimental mod files, with optional ZIP output and a manifest.
   speech or music.
 - For supported WAV loops, the app scales the destination loop markers to fit
   the replacement audio. Loop playback in Fallout 4 has not been verified.
+- Chaos mode excludes voice audio that the sound converter does not support.
+  Cross-type playback in Fallout 4 has not been verified.
 
 The app stops if it finds duplicate selected voice paths or multiple voice
 archives for the same base game or DLC. Voice modes include recognized
@@ -71,7 +72,7 @@ folder.
 All modes process up to four files at once. This can increase CPU, memory, and
 temporary disk use.
 
-Sounds-only mode uses FFmpeg from `imageio-ffmpeg` to decode and resample
+Sounds-only and chaos modes use FFmpeg from `imageio-ffmpeg` to decode and resample
 audio. It uses WMAEncodeRS to encode XWM. Conversion can require substantial
 temporary space and time. The Windows FFmpeg binary is GPL-3.0-or-later; its
 license and source references are in
@@ -122,11 +123,11 @@ runtime and access to a Fallout 4 installation to create a mod.
    the generated voice data; BA2 output also stages loose files. Allow extra
    space for conversion and filesystem overhead. ZIP output requires additional
    space for both the ZIP and its staged copy.
-3. Select **Main character voices**, **Within each character/NPC**, or
-   **Sounds only**.
+3. Select **Main character voices**, **Within each character/NPC**,
+   **Sounds only**, or **Chaos mode**.
 4. `Loose files` is selected; BA2 output is currently unavailable in the UI.
-5. Leave **Create mod ZIP** selected to generate an installable ZIP alongside
-   the mod folder, or clear it to skip ZIP creation.
+5. Leave **Create mod ZIP** selected to generate an installable ZIP without
+   saving a separate mod folder, or clear it to save the mod folder instead.
 6. Enter a seed, or keep the generated seed.
 7. Select **Create mod**.
 
@@ -135,13 +136,18 @@ folder buttons to open the selected folders on Windows.
 
 The output is created at
 `<working folder>/Fallout4VoiceRandomizer`. To run again, move or rename an
-existing output folder first. The `mod` folder contains the generated files;
+existing output folder first. If ZIP creation is not selected, the `mod` folder
+contains the generated files. If ZIP creation is selected, only the ZIP
+contains the generated mod files.
 `manifest.json` records the seed, input archive names, sizes and modification
 times, and mapping. `randomization_log.txt` provides a readable
-source-archive/source-path to destination-archive/destination-path list. If
-selected, `Fallout4VoiceRandomizer.zip` contains only the generated mod files.
-For sounds-only mode, the manifest and log also list excluded paths and their
-reasons. The output preserves each destination format; the app converts
+source-archive/source-path to destination-archive/destination-path list.
+For sounds-only and chaos modes, the manifest and log also list excluded paths
+and their reasons. Chaos mode shuffles supported voice audio and sound effects
+in one pool, including across characters. Each source is used once. Cross-type
+replacements are possible but not guaranteed for every seed. It needs both
+base-game voice and sound archives and applies the sounds-only exclusions.
+The output preserves each destination format; the app converts
 between WAV and XWM when needed.
 The ZIP stores files without compression. Keep generated files, ZIPs, and
 manifests local: they can contain game data and must not be distributed with
@@ -172,8 +178,8 @@ enable the ZIP in the mod manager.
 - To remove the result, disable or remove the generated mod from the mod
   manager. Do not replace the original voice archives.
 
-The generated audio keeps the destination lip-sync data. Voice lines can
-therefore be out of sync with lip movements or subtitles.
+Generated voice files keep the destination lip-sync data. Voice lines and
+sound effects can therefore be out of sync with lip movements or subtitles.
 
 ## Tests
 

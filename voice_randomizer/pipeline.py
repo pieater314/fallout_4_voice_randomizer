@@ -8,7 +8,7 @@ import struct
 import tempfile
 import zipfile
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event
 from typing import Callable
@@ -34,6 +34,7 @@ class Cancelled(Exception):
 class Input:
     archive: VoiceArchive
     entry: VoiceEntry
+    sound: bool = False
 
 
 def discover(game: Path, mode: str = "player") -> list[VoiceArchive]:
@@ -217,8 +218,8 @@ def _write_zip(mod: Path, target: Path, progress: Progress,
 def _write_entries(mapping: dict[str, str], by_path: dict[str, Input],
                    formats: dict[str, SoundFormat], stage: Path, files: Path,
                    work: Path, progress: Progress, cancelled: Callable[[], bool],
-                   *, sounds: bool) -> tuple[list[dict[str, str]],
-                                             dict[Path, list[tuple[VoiceEntry, Path]]]]:
+                   *, mode: str) -> tuple[list[dict[str, str]],
+                                          dict[Path, list[tuple[VoiceEntry, Path]]]]:
     stop = Event()
     tasks = iter(enumerate(mapping.items()))
     pending: dict[Future[bytes], tuple[int, str, str, Input, Input]] = {}
@@ -226,7 +227,8 @@ def _write_entries(mapping: dict[str, str], by_path: dict[str, Input],
     written: dict[int, tuple[Path, VoiceEntry, Path]] = {}
     total = len(mapping)
     completed = 0
-    workers = _SOUND_WORKERS if sounds else _VOICE_WORKERS
+    audio_mode = mode in ("sounds", "chaos")
+    workers = _SOUND_WORKERS if audio_mode else _VOICE_WORKERS
 
     def check_cancel() -> None:
         if stop.is_set() or cancelled():
@@ -235,7 +237,21 @@ def _write_entries(mapping: dict[str, str], by_path: dict[str, Input],
     def convert(destination: str, source: str, dst: Input, src: Input) -> bytes:
         check_cancel()
         try:
-            if sounds:
+            if mode == "chaos":
+                source_data = src.archive.read(src.entry)
+                check_cancel()
+                source_audio = source_data if src.sound else Fuz.parse(source_data).audio
+                destination_fuz = None if dst.sound else Fuz.parse(dst.archive.read(dst.entry))
+                destination_format = formats[destination.casefold()]
+                if destination_fuz is not None:
+                    destination_format = replace(destination_format, loop=None)
+                result = convert_sound(
+                    source_audio, formats[source.casefold()], destination_format,
+                    stage, check_cancel,
+                )
+                if destination_fuz is not None:
+                    result = Fuz(destination_fuz.lip, result).to_bytes()
+            elif mode == "sounds":
                 data = src.archive.read(src.entry)
                 check_cancel()
                 result = convert_sound(
@@ -278,27 +294,34 @@ def _write_entries(mapping: dict[str, str], by_path: dict[str, Input],
                 index, destination, source, dst, src = pending.pop(future)
                 result = future.result()
                 check_cancel()
-                if sounds and shutil.disk_usage(work).free < 2 * len(result):
-                    raise OSError("Not enough free space to stage and publish the sound output.")
+                if audio_mode and shutil.disk_usage(work).free < 2 * len(result):
+                    kind = "sound" if mode == "sounds" else "audio"
+                    raise OSError(f"Not enough free space to stage and publish the {kind} output.")
                 target = files.joinpath(*destination.split("/"))
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(result)
-                if sounds and hashlib.sha256(target.read_bytes()).digest() != hashlib.sha256(result).digest():
-                    raise ValueError(f"Sound output verification failed: {destination}")
+                if audio_mode and hashlib.sha256(target.read_bytes()).digest() != hashlib.sha256(result).digest():
+                    kind = "Sound" if mode == "sounds" else "Audio"
+                    raise ValueError(f"{kind} output verification failed: {destination}")
                 manifest[index] = {
                     "destination": destination, "source": source,
                     "destination_archive": dst.archive.path.name,
                     "source_archive": src.archive.path.name,
                 }
-                if sounds:
+                if audio_mode:
                     manifest[index]["source_format"] = formats[source.casefold()].kind
                     manifest[index]["destination_format"] = formats[destination.casefold()].kind
+                    if mode == "chaos":
+                        manifest[index]["source_type"] = "sound" if src.sound else "voice"
+                        manifest[index]["destination_type"] = "sound" if dst.sound else "voice"
                 else:
                     written[index] = (dst.archive.path, dst.entry, target)
                 completed += 1
                 if completed % 100 == 0 or completed == total:
-                    progress("Processing sounds" if sounds else "Processing voices",
-                             completed, total)
+                    stage_name = ("Processing sounds and voices" if mode == "chaos"
+                                  else "Processing sounds" if mode == "sounds"
+                                  else "Processing voices")
+                    progress(stage_name, completed, total)
             submit_tasks()
     finally:
         stop.set()
@@ -319,12 +342,12 @@ def build(game: Path, work: Path, output_type: str, seed: str,
     work = work.resolve()
     if game == work or game in work.parents or work in game.parents:
         raise ValueError("Select a working folder outside the game installation.")
-    if mode not in ("player", "character", "sounds"):
-        raise ValueError("Select 'player', 'character', or 'sounds' randomization mode.")
+    if mode not in ("player", "character", "sounds", "chaos"):
+        raise ValueError("Select 'player', 'character', 'sounds', or 'chaos' randomization mode.")
     if output_type not in ("loose", "ba2"):
         raise ValueError("Select loose files or BA2 output.")
-    if mode == "sounds" and output_type != "loose":
-        raise ValueError("Sounds-only mode supports loose files only.")
+    if mode in ("sounds", "chaos") and output_type != "loose":
+        raise ValueError(f"{'Sounds-only' if mode == 'sounds' else 'Chaos'} mode supports loose files only.")
     if not seed:
         raise ValueError("Enter a random seed.")
     work.mkdir(parents=True, exist_ok=True)
@@ -332,7 +355,9 @@ def build(game: Path, work: Path, output_type: str, seed: str,
     if final.exists():
         raise FileExistsError(f"Output already exists: {final}. Move or rename it before running.")
     progress("Reading archives", 0, 1)
-    archives = discover_sounds(game) if mode == "sounds" else discover(game, mode=mode)
+    voice_archives = discover(game, mode="character" if mode == "chaos" else mode) if mode != "sounds" else []
+    sound_archives = discover_sounds(game) if mode in ("sounds", "chaos") else []
+    archives = voice_archives + sound_archives
     identities = {}
     for archive in archives:
         stat = archive.path.stat()
@@ -341,11 +366,11 @@ def build(game: Path, work: Path, output_type: str, seed: str,
     pools: dict[str, list[str]] = {}
     formats: dict[str, SoundFormat] = {}
     exclusions = []
-    if mode == "sounds":
+    if mode in ("sounds", "chaos"):
         candidates: dict[str, list[Input]] = {}
-        for archive in archives:
+        for archive in sound_archives:
             for entry in archive.entries:
-                candidates.setdefault(entry.path.casefold(), []).append(Input(archive, entry))
+                candidates.setdefault(entry.path.casefold(), []).append(Input(archive, entry, sound=True))
         total_candidates = len(candidates)
         for index, (key, items) in enumerate(sorted(candidates.items()), 1):
             if cancelled():
@@ -375,25 +400,51 @@ def build(game: Path, work: Path, output_type: str, seed: str,
                 else:
                     by_path[key] = item
                     formats[key] = fmt
-                    pools.setdefault("sound-effects", []).append(item.entry.path)
+                    pools.setdefault("chaos" if mode == "chaos" else "sound-effects", []).append(item.entry.path)
             if reason:
                 exclusions.append({"path": item.entry.path,
                                    "archives": [i.archive.path.name for i in items],
                                    "reason": reason})
             if index % 100 == 0 or index == total_candidates:
                 progress("Inspecting sounds", index, total_candidates)
-    else:
-        for archive in archives:
+    if mode != "sounds":
+        seen_voices: set[str] = set()
+        total_voices = sum(len(archive.entries) for archive in voice_archives)
+        voice_index = 0
+        for archive in voice_archives:
             for entry in archive.entries:
+                if mode == "chaos" and cancelled():
+                    raise Cancelled()
                 key = entry.path.casefold()
-                if key in by_path:
+                if key in seen_voices or key in by_path:
                     raise ValueError(f"Duplicate voice path across archives: {entry.path}")
+                seen_voices.add(key)
+                if mode == "chaos":
+                    try:
+                        fmt = sound_format(Fuz.parse(archive.read(entry)).audio)
+                    except UnsupportedSound as error:
+                        exclusions.append({"path": entry.path, "archives": [archive.path.name],
+                                           "reason": str(error)})
+                    except ValueError as error:
+                        raise ValueError(f"Invalid voice {archive.path.name}!{entry.path}: {error}") from error
+                    else:
+                        by_path[key] = Input(archive, entry)
+                        formats[key] = fmt
+                        pools.setdefault("chaos", []).append(entry.path)
+                    voice_index += 1
+                    if voice_index % 100 == 0 or voice_index == total_voices:
+                        progress("Inspecting voices", voice_index, total_voices)
+                    continue
                 by_path[key] = Input(archive, entry)
                 if mode == "character":
                     pool_key = entry.path.rsplit("/", 1)[0].casefold()
                 else:
                     pool_key = entry.voice
                 pools.setdefault(pool_key, []).append(entry.path)
+    if mode == "chaos" and not any(item.sound for item in by_path.values()):
+        raise ValueError("No supported sound effects were found for chaos mode.")
+    if mode == "chaos" and not any(not item.sound for item in by_path.values()):
+        raise ValueError("No supported voice lines were found for chaos mode.")
     if not by_path:
         if mode == "sounds":
             raise ValueError("No supported sound effects were found.")
@@ -406,7 +457,7 @@ def build(game: Path, work: Path, output_type: str, seed: str,
         voice_seed = seed + ":" + pool_key
         mapping.update(shuffle_pool(paths, voice_seed))
     required = sum(item.entry.size for item in by_path.values()) * (
-        2 if output_type == "ba2" or mode == "sounds" else 1
+        2 if output_type == "ba2" or mode in ("sounds", "chaos") else 1
     )
     if shutil.disk_usage(work).free < required:
         raise OSError("Not enough free space in the working folder.")
@@ -419,7 +470,7 @@ def build(game: Path, work: Path, output_type: str, seed: str,
         mod.mkdir()
         files = stage / "files" if output_type == "ba2" else mod
         manifest, records = _write_entries(mapping, by_path, formats, stage, files, work,
-                                           progress, cancelled, sounds=mode == "sounds")
+                                           progress, cancelled, mode=mode)
         if output_type == "ba2":
             for index, archive in enumerate(archives, 1):
                 if cancelled():
@@ -452,8 +503,10 @@ def build(game: Path, work: Path, output_type: str, seed: str,
                                 "size": identities[a.path][0],
                                 "mtime_ns": identities[a.path][1]} for a in archives],
                   "mapping": manifest}
-        if mode == "sounds":
-            report.update({"mode": mode, "pool_rules": "Supported WAV and XWM sound effects",
+        if mode in ("sounds", "chaos"):
+            report.update({"mode": mode, "pool_rules": (
+                               "Supported voice audio and WAV and XWM sound effects"
+                               if mode == "chaos" else "Supported WAV and XWM sound effects"),
                            "exclusions": exclusions,
                            "unchanged_pools": sum(len(paths) == 1 for paths in pools.values())})
         (stage / "manifest.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -465,10 +518,13 @@ def build(game: Path, work: Path, output_type: str, seed: str,
         log_lines.extend(
             f"{item['source_archive']}!{item['source']} -> "
             f"{item['destination_archive']}!{item['destination']}"
+            + (f" ({item['source_type']} {item['source_format']} -> "
+               f"{item['destination_type']} {item['destination_format']})"
+               if mode == "chaos" else "")
             for item in manifest
         )
-        if mode == "sounds":
-            log_lines.extend(["", f"Excluded sound paths: {len(exclusions)}"])
+        if mode in ("sounds", "chaos"):
+            log_lines.extend(["", f"Excluded {'audio' if mode == 'chaos' else 'sound'} paths: {len(exclusions)}"])
             log_lines.extend(
                 f"Excluded {item['path']} ({', '.join(item['archives'])}): {item['reason']}"
                 for item in exclusions
@@ -482,10 +538,14 @@ def build(game: Path, work: Path, output_type: str, seed: str,
                 path.stat().st_size + 2 * len(path.relative_to(mod).as_posix().encode("utf-8")) + 256
                 for path in mod_files
             ) + 1024
-            stage_size = sum(path.stat().st_size for path in stage.rglob("*") if path.is_file())
-            if shutil.disk_usage(work).free < stage_size + 2 * zip_estimate:
-                raise OSError("Not enough free space to create and publish the ZIP and mod files.")
+            report_size = sum((stage / name).stat().st_size
+                              for name in ("manifest.json", "randomization_log.txt"))
+            if shutil.disk_usage(work).free < report_size + 2 * zip_estimate:
+                raise OSError("Not enough free space to create and publish the ZIP and reports.")
             _write_zip(mod, stage / "Fallout4VoiceRandomizer.zip", progress, cancelled)
+            if cancelled():
+                raise Cancelled()
+            shutil.rmtree(mod)
         # Publish only after validation; remove partial output if copying fails.
         if cancelled():
             raise Cancelled()

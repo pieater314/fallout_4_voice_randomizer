@@ -223,19 +223,28 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(publishing[0][1], 0)
         self.assertEqual(publishing[-1][1], publishing[-1][2])
 
-    def test_optional_zip_contains_only_mod_files_for_both_output_types(self):
+    def test_zip_replaces_mod_folder_for_both_output_types(self):
         for output_type in ("loose", "ba2"):
             with self.subTest(output_type=output_type):
                 events = []
+                raw_out = build(
+                    self.game, self.work / f"{output_type}-raw", output_type, "seed",
+                    lambda *_: None, lambda: False,
+                )
                 out = build(
                     self.game, self.work / output_type, output_type, "seed",
                     lambda *event: events.append(event), lambda: False, create_zip=True,
                 )
-                mod = out / "mod"
+                mod = raw_out / "mod"
                 files = {
                     path.relative_to(mod).as_posix(): path.read_bytes()
                     for path in mod.rglob("*") if path.is_file()
                 }
+                self.assertTrue(files)
+                self.assertFalse((out / "mod").exists())
+                self.assertFalse((raw_out / "Fallout4VoiceRandomizer.zip").exists())
+                self.assertTrue((out / "manifest.json").is_file())
+                self.assertTrue((out / "randomization_log.txt").is_file())
                 with zipfile.ZipFile(out / "Fallout4VoiceRandomizer.zip") as archive:
                     self.assertEqual(set(archive.namelist()), set(files))
                     for name, content in files.items():

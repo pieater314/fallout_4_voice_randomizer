@@ -81,10 +81,10 @@ class Application:
         modes = ttk.LabelFrame(settings, text="Randomization mode", padding=6)
         modes.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
         for label, value, state in (
-            ("Within each character/NPC", "character", "normal"),
-            ("Main character voices", "player", "normal"),
+            ("Within each character/NPC (Main character included)", "character", "normal"),
+            ("Main character voice only", "player", "normal"),
             ("Sounds only", "sounds", "normal"),
-            ("Chaos mode: sounds and voices", "chaos", "disabled"),
+            ("Chaos mode: sounds and voices", "chaos", "normal"),
         ):
             button = ttk.Radiobutton(
                 modes, text=label, variable=self.mode, value=value, state=state
@@ -145,8 +145,7 @@ class Application:
         ttk.Label(
             settings,
             text="The app leaves your game files unchanged. Shuffled voices will not "
-            "match lip movements or subtitles. Sounds only excludes voice files and "
-            "music-related paths, but some effects can contain speech or music.",
+            "match lip movements or subtitles.",
             wraplength=700,
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
@@ -387,13 +386,14 @@ class Application:
                     self.cancel_event.is_set, create_zip=create_zip, mode=mode
                 )
                 summary = ""
-                if mode == "sounds":
+                if mode in ("sounds", "chaos"):
                     report = json.loads((result / "manifest.json").read_text(encoding="utf-8"))
                     summary = (
-                        f"Excluded {len(report['exclusions'])} sound paths. "
+                        f"Excluded {len(report['exclusions'])} "
+                        f"{'audio' if mode == 'chaos' else 'sound'} paths. "
                         "See the manifest and log for details."
                     )
-                if mode == "sounds":
+                if mode in ("sounds", "chaos"):
                     self.events.put(("done", str(result), output, create_zip, summary))
                 else:
                     self.events.put(("done", str(result), output, create_zip))
@@ -439,8 +439,10 @@ class Application:
 
     def _update_progress(self, stage: str, current: int, total: int) -> None:
         if stage == "Reading archives":
+            mode = self.mode.get()
             self.status.set(
-                "Reading game sound archives..." if self.mode.get() == "sounds"
+                "Reading game voice and sound archives..." if mode == "chaos"
+                else "Reading game sound archives..." if mode == "sounds"
                 else "Reading game voice archives..."
             )
             if not self._progress_indeterminate:

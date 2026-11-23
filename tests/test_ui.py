@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -137,7 +138,8 @@ class ModeSelectionTests(unittest.TestCase):
         self.assertFalse(buttons["player"].instate(["disabled"]))
         self.assertFalse(buttons["character"].instate(["disabled"]))
         self.assertFalse(buttons["sounds"].instate(["disabled"]))
-        self.assertTrue(buttons["chaos"].instate(["disabled"]))
+        self.assertFalse(buttons["chaos"].instate(["disabled"]))
+        self.assertIn(buttons["chaos"], self.app.input_widgets)
 
     def test_ba2_output_is_unavailable(self):
         def widgets(parent):
@@ -172,6 +174,7 @@ class ModeSelectionTests(unittest.TestCase):
         self.assertIn("output folder", package_help)
         self.assertIn("mod folder", package_help)
         self.assertIn("manual packaging", package_help)
+        self.assertIn("not saved separately", package_help)
 
     def test_zip_checkbox_is_marked_recommended(self):
         def widgets(parent):
@@ -423,6 +426,16 @@ class ModeSelectionTests(unittest.TestCase):
         self.app.poll()
         self.assertIn("Excluded 3 sound paths", self.app.status.get())
 
+    def test_chaos_mode_progress_and_exclusion_summary(self):
+        self.app.mode.set("chaos")
+        self.app.events.put(("progress", "Reading archives", 0, 1))
+        self.app.poll()
+        self.assertEqual(self.app.status.get(), "Reading game voice and sound archives...")
+        self.app.events.put(("done", r"C:\test\output", "loose", False,
+                             "Excluded 2 audio paths. See the manifest and log for details."))
+        self.app.poll()
+        self.assertIn("Excluded 2 audio paths", self.app.status.get())
+
     def test_cancel_request_and_cancelled_result_have_clear_states(self):
         self.set_valid_folders()
         with patch("voice_randomizer.__main__.threading.Thread"):
@@ -457,6 +470,23 @@ class ModeSelectionTests(unittest.TestCase):
             self.app.start_run()
             thread.call_args.kwargs["target"]()
         self.assertEqual(build.call_args.kwargs["mode"], "character")
+
+    def test_chaos_selection_and_exclusion_summary(self):
+        _, work = self.set_valid_folders()
+        output = work / "output"
+        output.mkdir()
+        (output / "manifest.json").write_text(
+            json.dumps({"exclusions": [{}, {}]}), encoding="utf-8"
+        )
+        self.app.mode.set("chaos")
+        with patch("voice_randomizer.__main__.threading.Thread") as thread, patch(
+            "voice_randomizer.__main__.build", return_value=output
+        ) as build:
+            self.app.start_run()
+            thread.call_args.kwargs["target"]()
+        self.assertEqual(build.call_args.kwargs["mode"], "chaos")
+        self.app.poll()
+        self.assertIn("Excluded 2 audio paths", self.app.status.get())
 
 
 class DefaultPathTests(unittest.TestCase):
