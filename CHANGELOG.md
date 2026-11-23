@@ -4,7 +4,10 @@ Notable changes to each application release are listed here.
 
 ## [Unreleased]
 
-## [0.1.2] - 20261122 - Beta release
+## [0.1.4] - 20261122 - Beta release
+- implemented chaos mode
+
+## [0.1.3] - 20261122 - Beta release
 - implemented sound only mode
 - added multithreading to help speed up the processing of the files
 

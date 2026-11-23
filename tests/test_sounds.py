@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from test_ba2 import archive_bytes
 from voice_randomizer.audio import AudioConversionError
+from voice_randomizer.fuz import Fuz
 from voice_randomizer.pipeline import Cancelled, build
 from voice_randomizer.sounds import SoundFormat, UnsupportedSound, convert_sound, sound_format
 
@@ -90,6 +91,7 @@ class SoundModeTests(unittest.TestCase):
             self.assertEqual(set(archive.namelist()), {"sound/fx/a.wav", "sound/fx/b.xwm"})
             for name in archive.namelist():
                 self.assertEqual(sound_format(archive.read(name)).kind, Path(name).suffix[1:])
+        self.assertFalse((out / "mod").exists())
         log = (out / "randomization_log.txt").read_text(encoding="utf-8")
         self.assertIn("Excluded sound paths: 3", log)
 
@@ -381,6 +383,189 @@ class SoundModeTests(unittest.TestCase):
             with self.assertRaisesRegex(AudioConversionError, "Invalid converted audio"):
                 convert_sound(source, sound_format(source), SoundFormat("wav", 1, 44100, 16),
                               self.root, lambda: None)
+
+
+class ChaosModeTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.game = self.root / "game"
+        self.data = self.game / "Data"
+        self.data.mkdir(parents=True)
+        (self.game / "Fallout4.exe").touch()
+        self.work = self.root / "work"
+        self.voices = {
+            "sound/voice/fallout4.esm/one/a.fuz": Fuz(b"lip-a", audio("wav", b"A" * 20)),
+            "sound/voice/fallout4.esm/two/b.fuz": Fuz(b"lip-b", audio("xwm", b"B" * 20)),
+            "sound/voice/fallout4.esm/three/c.fuz": Fuz(b"lip-c", audio("wav", b"C" * 20)),
+            "sound/voice/fallout4.esm/four/d.fuz": Fuz(b"lip-d", audio("wav", b"D" * 20)),
+        }
+        self.sounds = {
+            "sound/fx/loop.wav": audio("wav", b"L" * 40, loop=(5, 14)),
+            "sound/fx/b.xwm": audio("xwm", b"X" * 20),
+            "sound/fx/c.wav": audio("wav", b"Y" * 20),
+            "sound/fx/d.xwm": audio("xwm", b"Z" * 20),
+        }
+        self.write_voices()
+        self.write_sounds()
+
+    def write_voices(self, extra=()):
+        entries = [(name.encode(), fuz.to_bytes(), False) for name, fuz in self.voices.items()]
+        (self.data / "Fallout4 - Voices.ba2").write_bytes(archive_bytes(1, entries + list(extra)))
+
+    def write_sounds(self, extra=()):
+        entries = [(name.encode(), data, False) for name, data in self.sounds.items()]
+        (self.data / "Fallout4 - Sounds.ba2").write_bytes(archive_bytes(1, entries + list(extra)))
+
+    def run_build(self, work=None, **kwargs):
+        return build(self.game, work or self.work, "loose", "seed", lambda *_: None,
+                     lambda: False, mode="chaos", **kwargs)
+
+    def test_mixed_mappings_preserve_destination_and_remove_source_loops(self):
+        voices = list(self.voices)
+        loop, sound_b, sound_c, sound_d = self.sounds
+        mapping = {
+            voices[0]: loop,
+            loop: voices[1],
+            voices[1]: voices[0],
+            sound_b: sound_c,
+            sound_c: sound_b,
+            voices[2]: sound_d,
+            sound_d: voices[3],
+            voices[3]: voices[2],
+        }
+        conversions = []
+
+        def fake_run(command, check_cancel):
+            check_cancel()
+            encoder = "--silent" in command
+            source = Path(command[1] if encoder else command[command.index("-i") + 1])
+            target = Path(command[2] if encoder else command[-1])
+            content = source.read_bytes()
+            data_pos = content.index(b"data")
+            size = struct.unpack_from("<I", content, data_pos + 4)[0]
+            payload = content[data_pos + 8:data_pos + 8 + size]
+            target.write_bytes(audio("xwm" if encoder else "wav", payload))
+            conversions.append("encode" if encoder else "decode")
+
+        with patch("voice_randomizer.pipeline.shuffle_pool", return_value=mapping), \
+             patch("voice_randomizer.sounds._run", side_effect=fake_run):
+            out = self.run_build(create_zip=True)
+        report = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["mode"], "chaos")
+        self.assertEqual(
+            {(item["source_type"], item["destination_type"]) for item in report["mapping"]},
+            {("voice", "voice"), ("voice", "sound"), ("sound", "voice"), ("sound", "sound")},
+        )
+        self.assertIn("encode", conversions)
+        self.assertIn("decode", conversions)
+        with zipfile.ZipFile(out / "Fallout4VoiceRandomizer.zip") as archive:
+            self.assertEqual(set(archive.namelist()), set(mapping))
+            results = {name: archive.read(name) for name in archive.namelist()}
+        self.assertFalse((out / "mod").exists())
+        for destination, source in mapping.items():
+            result = results[destination]
+            destination_audio = self.voices[destination].audio if destination in self.voices else self.sounds[destination]
+            source_audio = self.voices[source].audio if source in self.voices else self.sounds[source]
+            if destination in self.voices:
+                fuz = Fuz.parse(result)
+                self.assertEqual(fuz.lip, self.voices[destination].lip)
+                result = fuz.audio
+            self.assertEqual(sound_format(result), sound_format(destination_audio))
+            self.assertIn(source_audio[source_audio.index(b"data") + 8:source_audio.index(b"data") + 10], result)
+            self.assertEqual(sound_format(result).loop is not None, destination == loop)
+        scaled = sound_format(results[loop]).loop
+        self.assertEqual(struct.unpack_from("<II", scaled.chunk, 44), (2, 7))
+        log = (out / "randomization_log.txt").read_text(encoding="utf-8")
+        self.assertIn("(sound wav -> voice wav)", log)
+
+    def test_seed_exclusions_and_mapping(self):
+        unsupported = Fuz(b"lip", audio("wav", cue=True)).to_bytes()
+        self.write_voices([(b"sound/voice/fallout4.esm/npc/cue.fuz", unsupported, False)])
+        self.write_sounds([(b"sound/fx/jingle.wav", audio("wav"), False)])
+        with patch("voice_randomizer.pipeline.convert_sound",
+                   side_effect=lambda data, source, destination, directory, check_cancel:
+                   audio(destination.kind)):
+            first = self.run_build()
+            second = self.run_build(work=self.root / "other")
+        reports = [json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+                   for out in (first, second)]
+        self.assertEqual(reports[0]["mapping"], reports[1]["mapping"])
+        mapping = reports[0]["mapping"]
+        self.assertEqual({item["source"] for item in mapping},
+                         {item["destination"] for item in mapping})
+        self.assertTrue(all(item["source"] != item["destination"] for item in mapping))
+        self.assertEqual({item["reason"] for item in reports[0]["exclusions"]},
+                         {"Unsupported audio cue or loop metadata", "Music-related path"})
+        self.assertIn("Excluded audio paths: 2",
+                      (first / "randomization_log.txt").read_text(encoding="utf-8"))
+
+    def test_invalid_missing_and_duplicate_inputs_do_not_publish(self):
+        for case in ("missing_sounds", "no_voices", "no_sounds", "bad_voice", "duplicate", "ba2"):
+            with self.subTest(case=case):
+                self.write_voices()
+                self.write_sounds()
+                if case == "missing_sounds":
+                    (self.data / "Fallout4 - Sounds.ba2").unlink()
+                elif case == "no_voices":
+                    self.voices, saved = {}, self.voices
+                    self.write_voices([(b"other/file.txt", b"data", False)])
+                    self.voices = saved
+                elif case == "no_sounds":
+                    self.sounds, saved = {}, self.sounds
+                    self.write_sounds([(b"other/file.txt", b"data", False)])
+                    self.sounds = saved
+                elif case == "bad_voice":
+                    self.write_voices([(b"sound/voice/fallout4.esm/npc/bad.fuz", b"bad", False)])
+                elif case == "duplicate":
+                    name, fuz = next(iter(self.voices.items()))
+                    self.write_voices([(name.upper().encode(), fuz.to_bytes(), False)])
+                message = {
+                    "missing_sounds": "base game sound archive",
+                    "no_voices": "No supported voice",
+                    "no_sounds": "No supported sound",
+                    "bad_voice": "Invalid voice",
+                    "duplicate": "duplicate voice path",
+                    "ba2": "loose files only",
+                }[case]
+                with self.assertRaisesRegex(ValueError, message):
+                    build(self.game, self.work, "ba2" if case == "ba2" else "loose",
+                          "seed", lambda *_: None, lambda: False, mode="chaos")
+                self.assertFalse((self.work / "Fallout4VoiceRandomizer").exists())
+
+    def test_conversion_failure_and_cancellation_do_not_publish(self):
+        with patch("voice_randomizer.pipeline.convert_sound", side_effect=ValueError("conversion failed")):
+            with self.assertRaisesRegex(ValueError, "Cannot replace .*conversion failed"):
+                self.run_build()
+        cancelled = threading.Event()
+
+        def cancel_conversion(data, source, destination, directory, check_cancel):
+            cancelled.set()
+            check_cancel()
+
+        with patch("voice_randomizer.pipeline.convert_sound", side_effect=cancel_conversion):
+            with self.assertRaises(Cancelled):
+                build(self.game, self.work, "loose", "seed", lambda *_: None,
+                      cancelled.is_set, mode="chaos")
+        self.assertFalse((self.work / "Fallout4VoiceRandomizer").exists())
+        self.assertEqual(list(self.work.iterdir()), [])
+
+    def test_changed_sound_archive_does_not_publish(self):
+        source = self.data / "Fallout4 - Sounds.ba2"
+
+        def progress(stage, current, total):
+            if stage == "Processing sounds and voices" and current == total:
+                with source.open("ab") as stream:
+                    stream.write(b"changed")
+
+        with patch("voice_randomizer.pipeline.convert_sound",
+                   side_effect=lambda data, source, destination, directory, check_cancel:
+                   audio(destination.kind)):
+            with self.assertRaisesRegex(ValueError, "Input archive changed"):
+                build(self.game, self.work, "loose", "seed", progress,
+                      lambda: False, mode="chaos")
+        self.assertFalse((self.work / "Fallout4VoiceRandomizer").exists())
 
 
 if __name__ == "__main__":
