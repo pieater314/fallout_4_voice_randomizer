@@ -511,6 +511,7 @@ def build(game: Path, work: Path, output_type: str, seed: str,
         stage = Path(temporary)
         mod = stage / "mod"
         mod.mkdir()
+        (mod / "_seed").write_text(seed, encoding="utf-8")
         files = stage / "files" if output_type == "ba2" else mod
         manifest, records = _write_entries(mapping, by_path, formats, stage, files, work,
                                            progress, cancelled, mode=mode)
